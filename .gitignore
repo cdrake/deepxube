@@ -8,6 +8,9 @@ todo.txt
 deepxube/implementations/data/*
 *.DS_Store
 .idea/
+.vscode/
+.claude/
+CLAUDE.md
 old/
 *\.egg-info/
 bk.lp
