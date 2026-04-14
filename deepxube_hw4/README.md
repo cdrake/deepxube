@@ -69,27 +69,97 @@ and rely on the biological simulator (§3 of `WRITEUP.md`) for supervision.
 
 ## Quick start (after data download)
 
+The `--domain` flag uses the format `lesion_evo.<subject_id>[.<n_parcels>]`,
+e.g. `lesion_evo.sub-1.300` for SOOP subject 1 with 300 SLIC supervoxels. The
+same subject id must be used for pretrain / eval / viz (the heuristic is
+parcellation-specific).
+
+### 1. Train the warm-start heuristic (~1 min on CPU)
+
 ```sh
-# 1. Supervised warm-start heuristic (~1 minute):
 python -m deepxube_hw4.pretrain_heur --domain lesion_evo.sub-1.300 \
     --out deepxube_hw4/output_warm --n_traj 400 --epochs 10
+```
 
-# 2. 100-trial quantitative evaluation:
+Writes `output_warm/heur.pt` and `heur_targ.pt`. Watch for final `mae` near
+0.5 on cost-to-go.
+
+### 2. Quantitative evaluation
+
+```sh
 python -m deepxube_hw4.eval_heur --domain lesion_evo.sub-1.300 \
-    --heur_dir deepxube_hw4/output_warm --n_trials 100
+    --heur_dir deepxube_hw4/output_warm --n_trials 100 --seed 1
+```
 
-# 3a. Triplanar interactive viz with live Q-values:
+Reports overall solve rate, mean path-optimality, and a per-`|s△g|` bucket
+breakdown. Expected: ≈87% solved, 100% path-optimality on the solved subset
+(`lb = |s△g|` is the unit-cost lower bound; `mean_opt = path_len / lb = 1.0`
+means every solved instance found a shortest path).
+
+### 3. Interactive visualisation
+
+There are two independent viz frontends. Both take `--heur_dir`, a random-walk
+goal length `--steps`, and an optional `--seed`.
+
+#### 3a. Triplanar (axial/coronal/sagittal) with live Q-values
+
+Best for debugging — you see the DWI slices and a ranked list of the
+heuristic's top actions at each step.
+
+```sh
+# Interactive mode: type actions yourself, see top-6 Q-values before each step.
+python -m deepxube_hw4.viz_with_heur --domain lesion_evo.sub-1.300 \
+    --heur_dir deepxube_hw4/output_warm --steps 10 --mode interactive
+
+# Solve mode: run greedy-Q to completion, step through the trajectory.
 python -m deepxube_hw4.viz_with_heur --domain lesion_evo.sub-1.300 \
     --heur_dir deepxube_hw4/output_warm --steps 10 --mode solve
+```
 
-# 3b. 3D volumetric viz (drag to rotate; n/p to step):
+Keys in solve mode: `n` = next state, `p` = previous, `<int>` = jump to
+index, `<Enter>` or `q` = quit. Overlay colors: cyan = acute mask,
+lime = target/goal, red = current state, gray = DWI background.
+
+#### 3b. 3D volumetric (matplotlib `ax.voxels`)
+
+```sh
+# Interactive: drag to rotate, scroll to zoom, n/p to step through trajectory.
 python -m deepxube_hw4.viz_3d --domain lesion_evo.sub-1.300 \
     --heur_dir deepxube_hw4/output_warm --steps 10 --stride 4
 
-# 3c. Save a trajectory as a GIF:
+# Save a GIF of the whole solve trajectory:
 python -m deepxube_hw4.viz_3d --domain lesion_evo.sub-1.300 \
     --heur_dir deepxube_hw4/output_warm --steps 10 --save_gif solve.gif
 ```
+
+Keys in interactive mode: `n`/`right` = next step, `p`/`left` = previous,
+`home`/`end` = jump to first/last. Overlay colors are the same as the
+triplanar viz. `--stride` downsamples the voxel grid before `ax.voxels`
+(stride 4 ≈ 50k voxels rendered, which is the matplotlib sweet spot;
+stride 2 is sharper but slow; stride 1 is unusable).
+
+If solves are uninteresting (e.g. `|s△g|=1`), bump `--steps` (reverse random
+walk length used to construct the goal) or try a different `--seed` until
+you get a more visually informative trajectory.
+
+### 4. Re-running DAVI (optional, currently a regression)
+
+DAVI on top of the warm-start degraded performance in our setup — see
+WRITEUP §4.5. To reproduce:
+
+```sh
+mkdir -p deepxube_hw4/output_davi
+cp deepxube_hw4/output_warm/heur.pt deepxube_hw4/output_davi/
+cp deepxube_hw4/output_warm/heur_targ.pt deepxube_hw4/output_davi/
+python -m deepxube_hw4.train_launch --domain lesion_evo.sub-1.300 \
+    --heur lesion_evo_mlp.512H_3L --heur_type QIn \
+    --pathfind beam_q.1B_5.0T --step_max 15 --bal \
+    --search_itrs 50 --up_itrs 50 --up_gen_itrs 50 \
+    --batch_size 128 --up_batch_size 64 \
+    --max_itrs 1000 --procs 1 --dir deepxube_hw4/output_davi
+```
+
+Then `eval_heur --heur_dir deepxube_hw4/output_davi` to compare.
 
 ## Tests
 
