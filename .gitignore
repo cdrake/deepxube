@@ -31,3 +31,7 @@ valid.pkl
 *__pycache__*
 *figures.pptx
 notes.txt
+deepxube_hw4/data/
+deepxube_hw4/output/
+deepxube_hw4/output_*/
+deepxube_hw4/*.png
