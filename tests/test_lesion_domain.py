@@ -1,74 +1,71 @@
-"""Smoke tests for LesionPathDomain (HW4).
+"""Smoke tests for LesionEvolutionDomain (HW4).
 
-The domain is not registered with `domain_factory`, so these tests exercise it
-directly. They are skipped if the MNI152 T1 file isn't available locally.
+Skipped if the SOOP `sub-1` data isn't present locally.
 """
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 
-from deepxube_hw4.domain import (
-    DEFAULT_T1,
-    LesionAction,
-    LesionGoal,
-    LesionPathDomain,
-    LesionState,
-)
+from deepxube_hw4.soop import DEFAULT_ROOT
 
 pytestmark = pytest.mark.skipif(
-    not Path(DEFAULT_T1).exists(),
-    reason=f"MNI152 T1 not available at {DEFAULT_T1}",
+    not (DEFAULT_ROOT / "sub-1" / "dwi" / "sub-1_rec-TRACE_dwi.nii.gz").exists(),
+    reason="SOOP sub-1 not downloaded; see deepxube_hw4/README.md",
 )
 
 
 @pytest.fixture(scope="module")
-def domain() -> LesionPathDomain:
-    return LesionPathDomain(downsample=4)
+def domain():
+    from deepxube_hw4.train_evolution import TrainableLesionEvo
+    return TrainableLesionEvo(subject_id="sub-1", n_parcels=300)
 
 
-def test_instantiation(domain: LesionPathDomain) -> None:
-    assert domain.t1.ndim == 3
-    assert domain.shape == domain.t1.shape
-    assert domain.lesion.sum() > 0
-    assert len(domain.actions_fixed) == 6
+def test_instantiation(domain):
+    assert domain.K > 0
+    assert len(domain.acute) > 0
 
 
-def test_sample_problem_instances(domain: LesionPathDomain) -> None:
-    starts, goals = domain.sample_problem_instances([0, 0, 0])
-    assert len(starts) == 3 and len(goals) == 3
-    assert all(isinstance(s, LesionState) for s in starts)
-    assert all(isinstance(g, LesionGoal) for g in goals)
+def test_legal_actions_includes_stop_and_in_range(domain):
+    from deepxube_hw4.evolution import STOP
+    s = domain.start_state()
+    acts = domain.legal_actions(s)
+    assert any(a.kind == STOP for a in acts)
+    for a in acts:
+        if a.kind != STOP:
+            assert 1 <= a.parcel <= domain.K
 
 
-def test_start_not_solved(domain: LesionPathDomain) -> None:
-    starts, goals = domain.sample_problem_instances([0])
-    # Start is chosen opposite the lesion centroid — must be outside the mask.
-    assert not any(domain.is_solved(starts, goals))
+def test_next_state_and_solved(domain):
+    from deepxube_hw4.evolution import EvolutionGoal
+    s = domain.start_state()
+    goal = EvolutionGoal(s.active)
+    assert domain.is_solved([s], [goal]) == [True]
+    acts = [a for a in domain.legal_actions(s) if a.kind != 0]
+    if acts:
+        s2, _ = domain.next_state([s], [acts[0]])
+        assert domain.is_solved(s2, [goal]) == [False]
 
 
-def test_next_state_bounds_and_cost(domain: LesionPathDomain) -> None:
-    s = LesionState(0, 0, 0)
-    # All six moves from the origin corner: -i/-j/-k clamp in place.
-    actions = [LesionAction(i) for i in range(6)]
-    nexts, costs = domain.next_state([s] * 6, actions)
-    assert len(nexts) == 6 and costs == [1.0] * 6
-    for ns in nexts:
-        assert 0 <= ns.i < domain.shape[0]
-        assert 0 <= ns.j < domain.shape[1]
-        assert 0 <= ns.k < domain.shape[2]
+def test_sample_problem_instances(domain):
+    starts, goals = domain.sample_problem_instances([0, 3, 6])
+    assert len(starts) == len(goals) == 3
+    assert domain.is_solved([starts[0]], [goals[0]]) == [True]
 
 
-def test_straight_line_path_reaches_lesion(domain: LesionPathDomain) -> None:
-    start = domain.sample_start_state()
-    states, actions = domain.straight_line_path(start, domain.lesion_centroid)
-    assert len(states) == len(actions) + 1
-    assert domain.is_solved([states[-1]], [LesionGoal()])[0]
+def test_nn_input_shape(domain):
+    from deepxube.factories.nnet_input_factory import get_nnet_input_t
+    from deepxube_hw4.evolution import EvolutionGoal
+    nin = get_nnet_input_t(("lesion_evo", "lesion_evo_sga"))(domain=domain)
+    s = domain.start_state()
+    g = EvolutionGoal(s.active)
+    acts = domain.legal_actions(s)
+    feats = nin.to_np([s] * len(acts), [g] * len(acts), acts)
+    assert feats[0].shape == (len(acts), nin.get_feat_dim())
 
 
-def test_string_to_action(domain: LesionPathDomain) -> None:
-    for i in range(6):
-        a = domain.string_to_action(str(i))
-        assert a is not None and a.idx == i
-    assert domain.string_to_action("bogus") is None
+def test_simulator_rollout(domain):
+    import numpy as np
+    from deepxube_hw4.simulator import simulate
+    traj = simulate(domain, np.random.default_rng(0), max_steps=10)
+    assert traj.length >= 0
+    assert len(traj.states) == traj.length + 1
