@@ -35,3 +35,11 @@ deepxube_hw4/data/
 deepxube_hw4/output/
 deepxube_hw4/output_*/
 deepxube_hw4/*.png
+# Writeup figures — keep these tracked
+!deepxube_hw4/soop_sub1_domain.png
+!deepxube_hw4/soop_sub1_parcels.png
+!deepxube_hw4/evo_sub1_sim.png
+!deepxube_hw4/train_curves.png
+!deepxube_hw4/viz_stepthrough.png
+!deepxube_hw4/fig_solve_rate.png
+!deepxube_hw4/fig_nodes_scatter.png

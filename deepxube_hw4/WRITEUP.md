@@ -24,6 +24,14 @@ Novelty for DeepXube: it has only been demonstrated on combinatorial puzzles.
 Variable-size action spaces over subject-specific parcellations with
 frozenset-equality goals is a new regime.
 
+![SOOP sub-1 DWI with acute (pink) and chronic (red) lesion masks](soop_sub1_domain.png)
+
+*Figure 1: SOOP subject 1 DWI TRACE volume with the two independent lesion
+masks (acute pink, chronic red) shown on sagittal / coronal / axial slices.
+Acute and chronic are not paired timepoints, so the domain uses the acute
+mask as start and a calibrated simulator (or an external target) to supply
+the goal.*
+
 ## 2. Pipeline
 
 ```
@@ -50,6 +58,13 @@ SOOP DWI ─▶ SLIC parcellation ─▶ LesionEvolutionDomain ─▶ DeepXube m
 | `eval_heur.py` | 100-trial solve rate + path-optimality. |
 | `viz_with_heur.py` | Interactive & solve-mode viz with live Q-values. |
 
+![SLIC parcellation (K=288) with lesion overlay](soop_sub1_parcels.png)
+
+*Figure 2: Subject-specific SLIC supervoxel parcellation (K = 288) on the
+left; the acute lesion overlay on the right. Each state is a frozenset of
+active parcel indices; actions are EXPAND / SHRINK over parcels adjacent to
+the current boundary.*
+
 ## 3. Biological simulator
 
 `simulate(domain, ...)` rolls out a stochastic acute→chronic trajectory:
@@ -66,6 +81,12 @@ Grid calibration against published population priors
 `shrink_bias=3.0, expand_bias=0.3, p_stop_step=0.05` (actual: mean_ratio=0.906,
 mean_length=15.0).
 
+![Simulator rollout: acute → simulated chronic](evo_sub1_sim.png)
+
+*Figure 3: A calibrated simulator rollout. Cyan = acute (start), lime =
+simulated chronic (goal), red = current active parcels. |active| = 15 after
+~15 EXPAND / SHRINK steps, matching the population mean trajectory length.*
+
 ## 4. DAVI attempts and refinements
 
 The project iterated through several DAVI configurations before finding one
@@ -80,6 +101,13 @@ cases); loss climbed 0.05 → 1.0+; cost-to-go diverged unboundedly. Diagnosis:
 with beam=1 over a ~80-action legal set and a random heuristic, the search
 never reaches a goal state, so bootstrapped targets grow every iteration with
 no grounded signal.
+
+![Cold-DAVI smoke run: loss / cost-to-go / solve rate over 50 iterations](train_curves.png)
+
+*Figure 4: Cold DAVI (50-iter smoke) — loss oscillates, predicted cost-to-go
+tracks the (unbounded) bootstrap target, and `%solved` flatlines near the
+`start == goal` floor. Extending to 2000 iters did not change the shape; the
+search never generates a grounded 0-cost terminal, so the target drifts.*
 
 ### 4.2 Step curriculum (`output_2k_bal/`)
 Added `--bal` (trainer auto-advances `step_max_curr` from 1 when solve-rate ≥
@@ -134,6 +162,8 @@ Candidate fixes (not pursued here):
 
 ## 5. Results
 
+### 5.1 Warm-start heuristic, 100-trial eval
+
 100 trials, seed=1, reverse-walk length ∈ [2, 15], greedy-Q with budget 60:
 
 ```
@@ -152,6 +182,35 @@ Mean optimality (path/lb, solved only): 1.000   (lb = |s△g|)
 bound). Failures concentrate at `|s△g| ≥ 9`, where greedy-Q enters local
 minima — precisely the regime DAVI refinement should address, since positive
 reinforcement is now available.
+
+### 5.2 Head-to-head vs uniform-cost search
+
+30 easy instances (short reverse-random-walk goals, `|s△g| ∈ [1, 4]`) and
+30 hard instances (simulator-calibrated goals, `|s△g|` typically ≥ 8),
+10 s/instance budget, `deepxube solve` with `graph_q` pathfinder. UCS sets
+`weight=0` (Dijkstra), heuristic A\* uses `weight=1` with the warm-start net.
+
+![Solve rate and mean nodes, UCS vs. heuristic](fig_solve_rate.png)
+
+*Figure 5: UCS solves only the short easy goals within the budget (37%) and
+none of the hard ones (0%). The learned heuristic solves every easy instance
+and 70% of the hard ones while generating roughly 10× fewer nodes on the
+easy split where both are solvable.*
+
+![Per-instance nodes expanded, UCS vs. heuristic](fig_nodes_scatter.png)
+
+*Figure 6: Each dot is one instance. On instances both solvers handle (blue,
+easy only), every single point sits below the y = x diagonal — the heuristic
+is uniformly more efficient, not just on average. Green triangles on the
+right edge of each panel are instances the heuristic solved but UCS timed
+out on (≈75k nodes generated with no solution).*
+
+![Interactive viz of the heuristic finding a goal](viz_stepthrough.png)
+
+*Figure 7: Mid-search frame from `viz_with_heur.py`. Cyan outline = acute
+start, lime outline = target goal, red fill = current active parcels.
+Green outlines mark the frontier of parcels the Q-head is evaluating at
+this step.*
 
 ## 6. Progress log
 
