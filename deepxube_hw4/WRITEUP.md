@@ -11,7 +11,12 @@ about what the lesion *will look like* after the tissue at risk either resolves
 problem as **goal-conditioned heuristic search on a parcellated brain**:
 
 - **State:** a set of active (infarcted) parcels over a subject-specific SLIC
-  supervoxel parcellation of the DWI volume.
+  supervoxel parcellation of the DWI volume. *SLIC (Simple Linear Iterative
+  Clustering, Achanta et al. 2012)* is a constrained k-means over position +
+  intensity that partitions a volume into `K` spatially compact, intensity-
+  coherent supervoxels — here, `K = 288` parcels per subject. *DWI (diffusion-
+  weighted imaging)* is the MR sequence most sensitive to cytotoxic edema;
+  acute stroke lesions light up bright on the TRACE reconstruction used here.
 - **Start:** the acute lesion mask from SOOP (ds004889).
 - **Goal:** a target parcel set — either simulated from a biological model
   during training, or a real chronic mask at inference / validation.
