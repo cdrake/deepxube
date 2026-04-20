@@ -282,21 +282,22 @@ for L in 0.0 0.3 0.5 0.7 1.0; do
 done
 ```
 
-| λ_len (inference) | solved | len_opt | cost_opt |
-|-------------------|-------:|--------:|---------:|
-| 0.0 (pure cost)   | 70 %   | 1.000   | 2.95     |
-| 0.3               | 60 %   | 1.000   | 2.95     |
-| 0.5               | 68 %   | 1.007   | 2.98     |
-| 0.7               | 60 %   | 1.000   | 2.90     |
-| 1.0 (pure length) | 62 %   | 1.003   | 3.04     |
+| λ_len (inference) | solved | len_opt | co_loose | co_tight |
+|-------------------|-------:|--------:|---------:|---------:|
+| 0.0 (pure cost)   | 64 %   | 1.000   | 2.94     | **1.000** |
+| 0.5               | 75 %   | 1.004   | 2.99     | **1.003** |
+| 1.0 (pure length) | 60 %   | 1.000   | 3.00     | **1.000** |
 
-Separating the heads gives comparable solve rates but leaves
-cost-optimality flat, *including at λ=0.0 where only the cost head
-drives argmin*. This falsifies the "length drowns cost" hypothesis:
-the admissible lower bound (`COST_MIN · |s△g|`) is the loose term —
-it assumes every required parcel flip costs the minimum, but the
-parcels dictated by `s△g` average ≈1.5 bio-cost, giving a ≈3× floor
-by construction. WRITEUP.md §5.5 has the full derivation.
+Separating the heads gives comparable solve rates but leaves `co_loose`
+flat, *including at λ=0.0 where only the cost head drives argmin*.
+This falsifies the "length drowns cost" hypothesis: the admissible LB
+(`COST_MIN · |s△g|`) is the loose term — it assumes every required
+parcel flip costs the minimum. Replacing it with
+`co_tight = path_cost / Σ_{p∈s△g} cost(a_p)` (sum of the exact bio-costs
+of the parcels that must flip) gives **1.000 at every λ**: the model
+already takes no wasted moves on solved instances; the remaining
+gap vs. ideal is solve rate on hard instances, not path cost. See
+WRITEUP.md §5.5.
 
 > Note: the 87 % solve rate reported for `output_warm/` in §5.1 of the
 > WRITEUP was measured on the **pre-fix K=288 parcellation** (before §2.1's

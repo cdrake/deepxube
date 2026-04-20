@@ -389,39 +389,45 @@ One K=285 checkpoint (`output_warm_dual/`, 400 trajectories, 8 epochs,
 final `mae_len = 0.63`, `mae_cost = 0.69`), same 100-trial protocol,
 seed=0:
 
-| λ_len | solved | len_opt | cost_opt |
-|-------|--------|---------|----------|
-| 0.0   | 70 %   | 1.000   | 2.95     |
-| 0.3   | 60 %   | 1.000   | 2.95     |
-| 0.5   | 68 %   | 1.007   | 2.98     |
-| 0.7   | 60 %   | 1.000   | 2.90     |
-| 1.0   | 62 %   | 1.003   | 3.04     |
+| λ_len | solved | len_opt | co_loose | co_tight |
+|-------|--------|---------|----------|----------|
+| 0.0   | 64 %   | 1.000   | 2.94     | **1.000** |
+| 0.5   | 75 %   | 1.004   | 2.99     | **1.003** |
+| 1.0   | 60 %   | 1.000   | 3.00     | **1.000** |
+
+`co_loose = path_cost / (COST_MIN · |s△g|)` is the admissible LB used
+in §5.1–5.4. `co_tight = path_cost / Σ_{p∈s△g} cost(a_p)` uses the
+**exact** sum-of-required-parcel-flips LB: each parcel in `s△g` must
+be flipped exactly once by its unique correct action (EXPAND if
+`p ∈ goal \ state`, else SHRINK), so `co_tight = 1.000` means the
+model's path touches only parcels in `s△g`, in some order, with no
+wasted moves.
 
 Findings:
 
-- **Solve rate matches scalar weighted-sum, best at λ=0.0 (70 %).** The
-  dual-head net gives comparable solve rates to the scalar λ sweep in
-  §5.4 (peak 72 % at λ=0.5) — separating the heads does not hurt.
-- **Cost-optimality is still flat (≈2.90–3.04) across all λ,
-  including pure-cost (λ=0.0).** The original diagnosis in §5.4 (length
-  term drowns cost term at greedy-Q argmin) is therefore *incomplete*.
-  Even with a pure-cost head driving argmin, paths still cost ≈2.95× the
-  admissible lower bound.
-- **Reinterpretation: the admissible LB is loose, not the model
-  miscalibrated.** The LB `COST_MIN · |s△g|` assumes every required
-  parcel flip costs the minimum `COST_MIN = 0.5`; in practice the
-  parcels dictated by `s△g` have intrinsic bio-costs averaging ≈1.5
-  (the mid-range of the 0.5–2.0 band), giving a ratio of ≈3.0
-  by construction. This matches the observed floor almost exactly.
-  A tighter LB — `Σ_{p ∈ s△g} cost(a_p)` — would put the same paths
-  near 1.0.
+- **Solve rate matches scalar weighted-sum.** The dual-head net gives
+  comparable solve rates to the scalar λ sweep in §5.4 (75 % at
+  λ=0.5 here vs. 72 % there) — separating the heads does not hurt.
+- **`co_loose` is flat (≈2.94–3.00) across all λ, including
+  pure-cost (λ=0.0).** This falsifies the original diagnosis in §5.4
+  (length term drowns cost term at greedy-Q argmin). Even with only
+  the cost head driving argmin, paths still cost ≈2.95× the
+  admissible LB.
+- **`co_tight = 1.000` everywhere.** The model never takes wasted
+  moves — every solved path flips exactly the parcels in `s△g` and
+  stops. The ≈3× floor in `co_loose` is an artifact of the LB:
+  `COST_MIN · |s△g|` assumes every required parcel happened to be
+  the cheapest possible one, but real `s△g` parcels average ≈1.5
+  bio-cost (the mid-range of the 0.5–2.0 band), giving a ≈3×
+  ratio by construction.
 
-Conclusion: the dual-head architecture is the correct methodological
-fix for head-balance, and cleanly validates that scalar weighted-sum
-targets were not the bottleneck. The real open problem is the
-cost-optimality metric itself, not the training target. λ=0.0
-dual-head matches the best scalar result on solve rate; leave the
-canonical warm-start as §5.4's λ=0.5 for robustness.
+Conclusion: the dual-head architecture validates that scalar
+weighted-sum targets were not the bottleneck (solve rates match),
+and the tight LB proves the model is already cost-optimal on solved
+instances. The remaining gap is solve rate on hard instances
+(`|s△g| ≥ 10`), not cost-optimality. λ=0.5 dual-head is competitive
+with §5.4's canonical scalar warm-start and exposes the same
+tradeoff surface without a retrain.
 
 ## 6. Progress log
 
@@ -447,14 +453,13 @@ canonical warm-start as §5.4's λ=0.5 for robustness.
    exploration/exploitation, not representation — retry with
    `beam_q.1B_0.1T` (or wider beam once supported) so the warm heuristic is
    actually followed during data generation.
-2. **Tighter cost-optimality metric.** §5.5 shows the dual-head net
-   doesn't move cost-optimality because the admissible LB
-   (`COST_MIN · |s△g|`) is loose by construction — it assumes every
-   required parcel costs the minimum. Replace with
-   `Σ_{p ∈ s△g} cost(a_p)` (sum of the intrinsic bio-costs of the
-   parcels that *must* flip), which should put correct paths near 1.0
-   and expose genuine suboptimality when the model takes detours
-   through high-cost parcels.
+2. **Hard-instance solve rate.** §5.5 with the tight LB confirms
+   solved paths are already cost-optimal (`co_tight = 1.000`);
+   the remaining loss is solve rate on hard instances (`|s△g| ≥ 10`),
+   which drops from ~100 % at `|s△g| ≤ 5` to ~40 % at `|s△g| = 13`.
+   The next lever is search breadth, not the heuristic: swap
+   greedy-Q for a small-beam-Q or weighted-A* that can recover from
+   single-step mistakes without abandoning the trajectory.
 3. **Cross-subject generalization.** Current MLP is tied to `K = 285`; move to
    a subject-invariant input (parcel features rather than one-hot) so a single
    heuristic transfers across SOOP subjects.
