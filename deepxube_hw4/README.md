@@ -259,10 +259,44 @@ Two findings:
   balanced objective. The length signal provides coarse progress gradient,
   the cost signal provides fine discrimination among similar continuations.
 - **Cost-optimality is ≈ constant (~2.9×) regardless of λ.** Scalar
-  weighted-sum targets don't induce cost-seeking behavior — the length
-  term dominates the greedy-Q argmin because its range is ~10× wider than
-  the cost term. A dual-head net with a sweepable inference-time λ is the
-  next step (WRITEUP.md §4.7, §5.4, §7 item 2).
+  weighted-sum targets don't induce cost-seeking behavior. Hypothesis
+  at the time: the length term dominates greedy-Q argmin because its
+  range is ~10× wider than the cost term. The dual-head experiment
+  below tests and refutes that hypothesis.
+
+### Dual-head Q net (methodological follow-up)
+
+To test whether the flat cost-optimality was caused by the scalar
+target conflating the two signals, we trained one dual-head
+checkpoint (`LesionEvoMLP(out_dim=2)` predicting
+`[length_to_go, cost_to_go]`) and combined the heads at inference:
+
+```sh
+python -m deepxube_hw4.pretrain_heur --domain lesion_evo.sub-1.300 \
+    --out deepxube_hw4/output_warm_dual --n_traj 400 --epochs 8 \
+    --dual_head
+for L in 0.0 0.3 0.5 0.7 1.0; do
+  python -m deepxube_hw4.eval_heur --domain lesion_evo.sub-1.300 \
+      --heur_dir deepxube_hw4/output_warm_dual --n_trials 100 \
+      --dual_head --lambda_len "$L"
+done
+```
+
+| λ_len (inference) | solved | len_opt | cost_opt |
+|-------------------|-------:|--------:|---------:|
+| 0.0 (pure cost)   | 70 %   | 1.000   | 2.95     |
+| 0.3               | 60 %   | 1.000   | 2.95     |
+| 0.5               | 68 %   | 1.007   | 2.98     |
+| 0.7               | 60 %   | 1.000   | 2.90     |
+| 1.0 (pure length) | 62 %   | 1.003   | 3.04     |
+
+Separating the heads gives comparable solve rates but leaves
+cost-optimality flat, *including at λ=0.0 where only the cost head
+drives argmin*. This falsifies the "length drowns cost" hypothesis:
+the admissible lower bound (`COST_MIN · |s△g|`) is the loose term —
+it assumes every required parcel flip costs the minimum, but the
+parcels dictated by `s△g` average ≈1.5 bio-cost, giving a ≈3× floor
+by construction. WRITEUP.md §5.5 has the full derivation.
 
 > Note: the 87 % solve rate reported for `output_warm/` in §5.1 of the
 > WRITEUP was measured on the **pre-fix K=288 parcellation** (before §2.1's

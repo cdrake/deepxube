@@ -373,8 +373,55 @@ Two findings, one positive and one negative:
 
 Conclusion: λ = 0.5 is promoted as the new canonical warm-start (72 % solve
 rate, length-optimal paths). Cost-optimality remains an open problem —
-next attempts should use a dual-head net (§7 item 2) so the cost signal
+next attempts should use a dual-head net (§5.5) so the cost signal
 can't be drowned out at inference.
+
+### 5.5 Dual-head Q net
+
+Motivated by §5.4: a scalar weighted-sum target mixes the two signals
+*before* the model sees them, so the cost term is drowned out by the
+length term's wider dynamic range. The dual-head fix gives each head
+clean scalar supervision — `LesionEvoMLP` with `out_dim=2` predicting
+`[length_to_go, cost_to_go]` — and combines them only at inference
+(`λ·L + (1−λ)·C`) with λ sweepable without retraining.
+
+One K=285 checkpoint (`output_warm_dual/`, 400 trajectories, 8 epochs,
+final `mae_len = 0.63`, `mae_cost = 0.69`), same 100-trial protocol,
+seed=0:
+
+| λ_len | solved | len_opt | cost_opt |
+|-------|--------|---------|----------|
+| 0.0   | 70 %   | 1.000   | 2.95     |
+| 0.3   | 60 %   | 1.000   | 2.95     |
+| 0.5   | 68 %   | 1.007   | 2.98     |
+| 0.7   | 60 %   | 1.000   | 2.90     |
+| 1.0   | 62 %   | 1.003   | 3.04     |
+
+Findings:
+
+- **Solve rate matches scalar weighted-sum, best at λ=0.0 (70 %).** The
+  dual-head net gives comparable solve rates to the scalar λ sweep in
+  §5.4 (peak 72 % at λ=0.5) — separating the heads does not hurt.
+- **Cost-optimality is still flat (≈2.90–3.04) across all λ,
+  including pure-cost (λ=0.0).** The original diagnosis in §5.4 (length
+  term drowns cost term at greedy-Q argmin) is therefore *incomplete*.
+  Even with a pure-cost head driving argmin, paths still cost ≈2.95× the
+  admissible lower bound.
+- **Reinterpretation: the admissible LB is loose, not the model
+  miscalibrated.** The LB `COST_MIN · |s△g|` assumes every required
+  parcel flip costs the minimum `COST_MIN = 0.5`; in practice the
+  parcels dictated by `s△g` have intrinsic bio-costs averaging ≈1.5
+  (the mid-range of the 0.5–2.0 band), giving a ratio of ≈3.0
+  by construction. This matches the observed floor almost exactly.
+  A tighter LB — `Σ_{p ∈ s△g} cost(a_p)` — would put the same paths
+  near 1.0.
+
+Conclusion: the dual-head architecture is the correct methodological
+fix for head-balance, and cleanly validates that scalar weighted-sum
+targets were not the bottleneck. The real open problem is the
+cost-optimality metric itself, not the training target. λ=0.0
+dual-head matches the best scalar result on solve rate; leave the
+canonical warm-start as §5.4's λ=0.5 for robustness.
 
 ## 6. Progress log
 
@@ -400,13 +447,14 @@ can't be drowned out at inference.
    exploration/exploitation, not representation — retry with
    `beam_q.1B_0.1T` (or wider beam once supported) so the warm heuristic is
    actually followed during data generation.
-2. **Cost-seeking heuristic via dual-head net.** §5.4 shows scalar
-   weighted-sum targets don't reduce cost-optimality (flat at ≈ 2.9×
-   floor) — the length term dominates the greedy-Q argmin because its
-   range is ~10× wider than the cost term. Next attempt: two-headed Q
-   (length head + cost head), combine at inference with a sweepable λ.
-   Each head gets clean scalar supervision and the cost signal can't be
-   drowned out.
+2. **Tighter cost-optimality metric.** §5.5 shows the dual-head net
+   doesn't move cost-optimality because the admissible LB
+   (`COST_MIN · |s△g|`) is loose by construction — it assumes every
+   required parcel costs the minimum. Replace with
+   `Σ_{p ∈ s△g} cost(a_p)` (sum of the intrinsic bio-costs of the
+   parcels that *must* flip), which should put correct paths near 1.0
+   and expose genuine suboptimality when the model takes detours
+   through high-cost parcels.
 3. **Cross-subject generalization.** Current MLP is tied to `K = 285`; move to
    a subject-invariant input (parcel features rather than one-hot) so a single
    heuristic transfers across SOOP subjects.

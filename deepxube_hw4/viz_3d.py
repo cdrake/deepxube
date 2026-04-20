@@ -96,12 +96,17 @@ def main():
     p.add_argument("--max_steps", type=int, default=40)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--save_gif", type=str, default="")
+    p.add_argument("--dual_head", action="store_true",
+                   help="Checkpoint is a dual-head net (out_dim=2: [len, cost]).")
+    p.add_argument("--lambda_len", type=float, default=0.5,
+                   help="Inference-time mix for dual-head: λ·L + (1-λ)·C.")
     args = p.parse_args()
 
     name, args_str = args.domain.split(".", 1)
     domain = domain_factory.build_class(name, domain_factory.get_kwargs(name, args_str))
     nin = get_nnet_input_t(("lesion_evo", "lesion_evo_sga"))(domain=domain)
-    heur = LesionEvoMLP(nin, out_dim=1, q_fix=False,
+    out_dim = 2 if args.dual_head else 1
+    heur = LesionEvoMLP(nin, out_dim=out_dim, q_fix=False,
                         hidden=args.hidden, n_layers=args.n_layers)
     load_nnet(str(Path(args.heur_dir) / "heur.pt"), heur); heur.eval()
 
@@ -110,6 +115,7 @@ def main():
     s0, g = states[0], goals[0]
     path_s, path_a, solved = greedy_q_search(
         domain, heur, nin, s0, g, max_steps=args.max_steps,
+        lambda_len=args.lambda_len,
     )
     print(f"|start|={len(s0.active)}  |goal|={len(g.target)}  |s△g|={len(s0.active ^ g.target)}")
     print(f"greedy-Q: {'SOLVED' if solved else 'FAILED'} in {len(path_a)} steps")

@@ -31,12 +31,17 @@ def main():
     p.add_argument("--steps_max", type=int, default=15)
     p.add_argument("--budget", type=int, default=60)
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--dual_head", action="store_true",
+                   help="Checkpoint is a dual-head net (out_dim=2: [len, cost]).")
+    p.add_argument("--lambda_len", type=float, default=0.5,
+                   help="Inference-time mix for dual-head: λ·L + (1-λ)·C.")
     args = p.parse_args()
 
     name, args_str = args.domain.split(".", 1)
     domain = domain_factory.build_class(name, domain_factory.get_kwargs(name, args_str))
     nin = get_nnet_input_t(("lesion_evo", "lesion_evo_sga"))(domain=domain)
-    heur = LesionEvoMLP(nin, out_dim=1, q_fix=False,
+    out_dim = 2 if args.dual_head else 1
+    heur = LesionEvoMLP(nin, out_dim=out_dim, q_fix=False,
                         hidden=args.hidden, n_layers=args.n_layers)
     load_nnet(str(Path(args.heur_dir) / "heur.pt"), heur); heur.eval()
 
@@ -53,7 +58,10 @@ def main():
         lb = len(s0.active ^ g.target)
         if lb == 0:
             continue
-        _, path_a, solved = greedy_q_search(domain, heur, nin, s0, g, max_steps=args.budget)
+        _, path_a, solved = greedy_q_search(
+            domain, heur, nin, s0, g, max_steps=args.budget,
+            lambda_len=args.lambda_len,
+        )
         path_cost = sum(domain.action_cost(a.kind, a.parcel) for a in path_a)
         bucket = min(lb, 20)
         entry = {

@@ -32,22 +32,27 @@ from deepxube_hw4.train_evolution import LesionEvoMLP, TrainableLesionEvo
 
 def build_dataset(
     domain: TrainableLesionEvo, n_traj: int, max_steps: int, seed: int,
-    lambda_len: float = 0.0,
-) -> Tuple[List[EvolutionState], List[EvolutionGoal], List[EvolutionAction], List[float]]:
-    """Build (state, goal, action, cost-to-go) tuples from simulator rollouts.
+    lambda_len: float = 0.0, dual_head: bool = False,
+) -> Tuple[List[EvolutionState], List[EvolutionGoal], List[EvolutionAction], np.ndarray]:
+    """Build (state, goal, action, target) tuples from simulator rollouts.
 
-    Target is a weighted combination of length-to-go and bio-cost-to-go:
-        target = lambda_len · len_remaining + (1 - lambda_len) · cost_remaining
+    Scalar mode (dual_head=False): target is the weighted combination
+        target = λ · len_remaining + (1 − λ) · cost_remaining
+    λ = 0 → pure bio-cost; λ = 1 → pure length; λ ∈ (0, 1) → multi-objective.
 
-    lambda_len = 0.0  -> pure bio-cost (minimum-biological-cost path)
-    lambda_len = 1.0  -> pure length (minimum-step path; unit-cost baseline)
-    lambda_len ∈ (0,1) -> multi-objective: bias toward cheap AND short paths
+    Dual-head mode (dual_head=True): target is a (2,)-vector per row —
+    [length_to_go, cost_to_go] — for a net that predicts both heads and
+    combines them at inference. `lambda_len` is ignored (each head gets
+    clean scalar supervision).
+
+    Returns targets as an np.ndarray of shape (N,) or (N, 2).
     """
     rng = np.random.default_rng(seed)
     states: List[EvolutionState] = []
     goals: List[EvolutionGoal] = []
     actions: List[EvolutionAction] = []
-    ctgs: List[float] = []
+    len_ctgs: List[float] = []
+    cost_ctgs: List[float] = []
     for _ in range(n_traj):
         traj = simulate(domain, rng, max_steps=max_steps)
         goal = EvolutionGoal(traj.states[-1].active)
@@ -60,26 +65,20 @@ def build_dataset(
             np.cumsum(step_costs[::-1])[::-1] if T > 0
             else np.zeros(0, dtype=np.float32)
         )
-        # len_remaining[t] = number of steps from state t to goal along this
-        # simulator trajectory (always T - t under unit action-count).
         len_remaining = np.arange(T, 0, -1, dtype=np.float32)
-
-        def target(len_rem: float, cost_rem: float) -> float:
-            return lambda_len * len_rem + (1.0 - lambda_len) * cost_rem
-
         for t in range(T):
             states.append(traj.states[t])
             goals.append(goal)
             actions.append(traj.actions[t])
-            ctgs.append(target(float(len_remaining[t]), float(cost_remaining[t])))
-        # Goal state: STOP action has cost-to-go 0 under both length and cost.
+            len_ctgs.append(float(len_remaining[t]))
+            cost_ctgs.append(float(cost_remaining[t]))
+        # Goal state: STOP has zero cost-to-go under both.
         states.append(traj.states[T])
         goals.append(goal)
         actions.append(EvolutionAction(STOP))
-        ctgs.append(0.0)
-        # Negatives: a *different* legal action at step t costs 1 more step
-        # plus its bio-cost, and then still needs `remaining[t]` to reach the
-        # goal. That yields target(len_rem+1, cost_rem+action_cost(a_neg)).
+        len_ctgs.append(0.0); cost_ctgs.append(0.0)
+        # Negative: random different legal action at step t costs one more
+        # step + its bio-cost, then still needs remaining to hit the goal.
         for t in range(T):
             s = traj.states[t]
             legal = [a for a in domain.legal_actions(s) if a != traj.actions[t]]
@@ -89,10 +88,18 @@ def build_dataset(
             states.append(s)
             goals.append(goal)
             actions.append(a_neg)
-            neg_len = float(len_remaining[t]) + 1.0
-            neg_cost = float(cost_remaining[t]) + domain.action_cost(a_neg.kind, a_neg.parcel)
-            ctgs.append(target(neg_len, neg_cost))
-    return states, goals, actions, ctgs
+            len_ctgs.append(float(len_remaining[t]) + 1.0)
+            cost_ctgs.append(
+                float(cost_remaining[t]) + domain.action_cost(a_neg.kind, a_neg.parcel)
+            )
+
+    len_arr = np.asarray(len_ctgs, dtype=np.float32)
+    cost_arr = np.asarray(cost_ctgs, dtype=np.float32)
+    if dual_head:
+        targets = np.stack([len_arr, cost_arr], axis=1)  # (N, 2)
+    else:
+        targets = lambda_len * len_arr + (1.0 - lambda_len) * cost_arr  # (N,)
+    return states, goals, actions, targets
 
 
 def main():
@@ -110,7 +117,13 @@ def main():
     p.add_argument(
         "--lambda_len", type=float, default=0.0,
         help="Mix factor: target = lambda_len·len + (1-lambda_len)·bio_cost. "
-             "0.0 = pure bio-cost; 1.0 = pure length (unit-cost baseline).",
+             "0.0 = pure bio-cost; 1.0 = pure length (unit-cost baseline). "
+             "Ignored if --dual_head is set.",
+    )
+    p.add_argument(
+        "--dual_head", action="store_true",
+        help="Train a 2-head net predicting [length_to_go, cost_to_go]; "
+             "heads are combined at inference time.",
     )
     args = p.parse_args()
 
@@ -121,16 +134,22 @@ def main():
 
     states, goals, actions, ctgs = build_dataset(
         domain, args.n_traj, args.max_steps, args.seed,
-        lambda_len=args.lambda_len,
+        lambda_len=args.lambda_len, dual_head=args.dual_head,
     )
     N = len(states)
-    print(f"Dataset: N={N}  lambda_len={args.lambda_len}  "
-          f"mean_ctg={np.mean(ctgs):.2f}  max_ctg={max(ctgs):.2f}")
+    if args.dual_head:
+        print(f"Dataset: N={N}  dual_head=True  "
+              f"mean_len={ctgs[:, 0].mean():.2f}  mean_cost={ctgs[:, 1].mean():.2f}  "
+              f"max_len={ctgs[:, 0].max():.2f}  max_cost={ctgs[:, 1].max():.2f}")
+    else:
+        print(f"Dataset: N={N}  lambda_len={args.lambda_len}  "
+              f"mean_ctg={np.mean(ctgs):.2f}  max_ctg={ctgs.max():.2f}")
 
     nnet_input_t = get_nnet_input_t(("lesion_evo", "lesion_evo_sga"))
     nnet_input = nnet_input_t(domain=domain)
+    out_dim = 2 if args.dual_head else 1
     heur = LesionEvoMLP(
-        nnet_input, out_dim=1, q_fix=False,
+        nnet_input, out_dim=out_dim, q_fix=False,
         hidden=args.hidden, n_layers=args.n_layers,
     )
     opt = torch.optim.Adam(heur.parameters(), lr=args.lr)
@@ -149,16 +168,27 @@ def main():
             idx = order[i : i + args.batch_size]
             x = feats_t[idx]
             y = targ_t[idx]
-            pred = heur([x])[0].squeeze(-1)
+            pred = heur([x])[0]
+            if not args.dual_head:
+                pred = pred.squeeze(-1)
             loss = loss_fn(pred, y)
             opt.zero_grad(); loss.backward(); opt.step()
             losses.append(float(loss))
         heur.eval()
         with torch.no_grad():
-            pred_all = heur([feats_t])[0].squeeze(-1).numpy()
-            mae = float(np.mean(np.abs(pred_all - np.asarray(ctgs))))
+            pred_all = heur([feats_t])[0]
+            if not args.dual_head:
+                pred_all = pred_all.squeeze(-1)
+            pred_np = pred_all.numpy()
+        if args.dual_head:
+            mae_len = float(np.mean(np.abs(pred_np[:, 0] - ctgs[:, 0])))
+            mae_cost = float(np.mean(np.abs(pred_np[:, 1] - ctgs[:, 1])))
+            print(f"epoch {ep + 1}/{args.epochs}  loss={np.mean(losses):.4f}  "
+                  f"mae_len={mae_len:.3f}  mae_cost={mae_cost:.3f}")
+        else:
+            mae = float(np.mean(np.abs(pred_np - np.asarray(ctgs))))
+            print(f"epoch {ep + 1}/{args.epochs}  loss={np.mean(losses):.4f}  mae={mae:.3f}")
         heur.train()
-        print(f"epoch {ep + 1}/{args.epochs}  loss={np.mean(losses):.4f}  mae={mae:.3f}")
 
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)

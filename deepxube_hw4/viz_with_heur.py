@@ -29,10 +29,16 @@ from deepxube_hw4.evolution import EvolutionAction, EvolutionGoal, EvolutionStat
 from deepxube_hw4.train_evolution import LesionEvoMLP, TrainableLesionEvo
 
 
-def build_heur(domain: TrainableLesionEvo, heur_dir: Path, hidden: int, n_layers: int):
+def build_heur(
+    domain: TrainableLesionEvo, heur_dir: Path, hidden: int, n_layers: int,
+    dual_head: bool = False,
+):
     nnet_input_t = get_nnet_input_t(("lesion_evo", "lesion_evo_sga"))
     nnet_input = nnet_input_t(domain=domain)
-    heur = LesionEvoMLP(nnet_input, out_dim=1, q_fix=False, hidden=hidden, n_layers=n_layers)
+    out_dim = 2 if dual_head else 1
+    heur = LesionEvoMLP(
+        nnet_input, out_dim=out_dim, q_fix=False, hidden=hidden, n_layers=n_layers,
+    )
     load_nnet(str(heur_dir / "heur.pt"), heur)
     heur.eval()
     return heur, nnet_input
@@ -45,11 +51,21 @@ def q_values(
     state: EvolutionState,
     goal: EvolutionGoal,
     actions: List[EvolutionAction],
+    lambda_len: float = 0.5,
 ) -> np.ndarray:
+    """Per-action scalar Q.
+
+    For a single-head net (out_dim=1) this is the raw prediction, ignoring
+    `lambda_len`. For a dual-head net (out_dim=2, predicting
+    [length_to_go, cost_to_go]) it's the weighted combination
+    `lambda_len * L + (1 - lambda_len) * C`.
+    """
     feats = nnet_input.to_np([state] * len(actions), [goal] * len(actions), actions)
     inputs = [torch.from_numpy(x) for x in feats]
-    out = heur(inputs)[0].cpu().numpy().ravel()
-    return out
+    out = heur(inputs)[0].cpu().numpy()
+    if out.ndim == 2 and out.shape[1] == 2:
+        return (lambda_len * out[:, 0] + (1.0 - lambda_len) * out[:, 1]).astype(np.float32)
+    return out.ravel()
 
 
 def print_q_top(acts: List[EvolutionAction], q: np.ndarray, k: int = 8) -> None:
@@ -62,6 +78,7 @@ def print_q_top(acts: List[EvolutionAction], q: np.ndarray, k: int = 8) -> None:
 def greedy_q_search(
     domain: TrainableLesionEvo, heur, nnet_input,
     start: EvolutionState, goal: EvolutionGoal, max_steps: int = 40,
+    lambda_len: float = 0.5,
 ) -> Tuple[List[EvolutionState], List[EvolutionAction], bool]:
     states = [start]
     actions: List[EvolutionAction] = []
@@ -72,7 +89,7 @@ def greedy_q_search(
         acts = [a for a in domain.legal_actions(s) if a.kind != 0]
         if not acts:
             break
-        q = q_values(heur, nnet_input, s, goal, acts)
+        q = q_values(heur, nnet_input, s, goal, acts, lambda_len=lambda_len)
         a = acts[int(np.argmin(q))]
         s = domain.next_state([s], [a])[0][0]
         states.append(s); actions.append(a)
@@ -97,17 +114,25 @@ def main():
     p.add_argument("--mode", choices=["interactive", "solve"], default="interactive")
     p.add_argument("--max_steps", type=int, default=40)
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--dual_head", action="store_true",
+                   help="Checkpoint is a dual-head net (out_dim=2: [len, cost]).")
+    p.add_argument("--lambda_len", type=float, default=0.5,
+                   help="Inference-time mix for dual-head: λ·L + (1-λ)·C.")
     args = p.parse_args()
 
     name, args_str = args.domain.split(".", 1)
     kwargs = domain_factory.get_kwargs(name, args_str)
     domain: TrainableLesionEvo = domain_factory.build_class(name, kwargs)
-    heur, nnet_input = build_heur(domain, Path(args.heur_dir), args.hidden, args.n_layers)
+    heur, nnet_input = build_heur(
+        domain, Path(args.heur_dir), args.hidden, args.n_layers,
+        dual_head=args.dual_head,
+    )
+    lam = args.lambda_len
 
     np.random.seed(args.seed)
     states, goals = domain.sample_problem_instances([args.steps])
     state, goal = states[0], goals[0]
-    h0 = float(q_values(heur, nnet_input, state, goal, [EvolutionAction(0)])[0])
+    h0 = float(q_values(heur, nnet_input, state, goal, [EvolutionAction(0)], lambda_len=lam)[0])
     print(f"start |active|={len(state.active)}  goal |target|={len(goal.target)}  h(start)={h0:+.3f}")
 
     fig = plt.figure(figsize=(12, 4))
@@ -115,7 +140,8 @@ def main():
 
     if args.mode == "solve":
         path_s, path_a, solved = greedy_q_search(
-            domain, heur, nnet_input, state, goal, max_steps=args.max_steps
+            domain, heur, nnet_input, state, goal,
+            max_steps=args.max_steps, lambda_len=lam,
         )
         print(f"greedy-Q: {'SOLVED' if solved else 'not solved'} in {len(path_a)} steps")
         idx, idx_max = 0, len(path_s) - 1
@@ -134,7 +160,7 @@ def main():
                 except ValueError:
                     continue
             s_now = path_s[idx]
-            h_now = float(q_values(heur, nnet_input, s_now, goal, [EvolutionAction(0)])[0])
+            h_now = float(q_values(heur, nnet_input, s_now, goal, [EvolutionAction(0)], lambda_len=lam)[0])
             action_str = f"last={path_a[idx - 1]}" if idx > 0 else "start"
             _render(domain, s_now, goal, fig, f"h={h_now:+.2f}  {action_str}")
     else:
@@ -142,7 +168,7 @@ def main():
         plt.show(block=False)
         while True:
             acts = domain.legal_actions(state)
-            q = q_values(heur, nnet_input, state, goal, acts)
+            q = q_values(heur, nnet_input, state, goal, acts, lambda_len=lam)
             print_q_top(acts, q, k=6)
             cmd = input("action (or blank to quit): ").strip()
             if not cmd:
@@ -151,7 +177,7 @@ def main():
             if a is None:
                 print(f"  bad action: {cmd!r}"); continue
             state = domain.next_state([state], [a])[0][0]
-            h_now = float(q_values(heur, nnet_input, state, goal, [EvolutionAction(0)])[0])
+            h_now = float(q_values(heur, nnet_input, state, goal, [EvolutionAction(0)], lambda_len=lam)[0])
             print(f"  |active|={len(state.active)}  h={h_now:+.3f}  solved={domain.is_solved([state],[goal])[0]}")
             _render(domain, state, goal, fig, f"h={h_now:+.2f}")
 

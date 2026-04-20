@@ -99,3 +99,20 @@ def test_next_state_returns_bio_costs(domain):
     assert all(COST_MIN <= c <= COST_MAX for c in costs)
     for a, c in zip(acts, costs):
         assert c == domain.action_cost(a.kind, a.parcel)
+
+
+def test_dual_head_forward(domain):
+    import torch
+    from deepxube.factories.nnet_input_factory import get_nnet_input_t
+    from deepxube_hw4.evolution import EvolutionGoal
+    from deepxube_hw4.train_evolution import LesionEvoMLP
+    nin = get_nnet_input_t(("lesion_evo", "lesion_evo_sga"))(domain=domain)
+    heur = LesionEvoMLP(nin, out_dim=2, q_fix=False, hidden=32, n_layers=2)
+    heur.eval()
+    s = domain.start_state()
+    g = EvolutionGoal(s.active)
+    acts = domain.legal_actions(s)[:4]
+    feats = nin.to_np([s] * len(acts), [g] * len(acts), acts)
+    with torch.no_grad():
+        out = heur([torch.from_numpy(x) for x in feats])[0]
+    assert out.shape == (len(acts), 2)
