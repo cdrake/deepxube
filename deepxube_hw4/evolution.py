@@ -4,7 +4,10 @@ State: set of active (infarcted) parcel IDs.
 Start: parcels covered by the acute mask.
 Goal: a target parcel set (during training — e.g. a simulated or paired chronic mask).
 Actions: expand into an adjacent inactive parcel, shrink an active parcel, or stop.
-Step cost: uniform 1.0 for now; biological priors can be added to `_action_cost` later.
+Step cost: biologically-weighted — cheap for plausible evolutions (edema
+resolution on dim, low-coverage parcels; penumbra completion on bright
+parcels) and expensive for implausible ones (un-infarcting the core, seeding
+new infarct in dim cortex). STOP keeps unit cost. See `action_cost`.
 """
 from __future__ import annotations
 
@@ -20,12 +23,18 @@ from deepxube.base.domain import (
     Action, Goal, State, StateGoalVizable, StringToAct,
 )
 from deepxube.utils.timing_utils import Times
-from deepxube_hw4.parcels import Parcellation, parcel_adjacency, parcellate_dwi
+from deepxube_hw4.parcels import Parcellation, brain_mask, parcel_adjacency, parcellate_dwi
 from deepxube_hw4.soop import SOOPSubject, load_subject
 
 STOP = 0
 EXPAND = 1
 SHRINK = 2
+
+# Bio-cost range. c_min is the admissible lower bound for any toggling action;
+# c_max is the cost of the most biologically implausible toggle.
+COST_MIN = 0.5
+COST_MAX = 2.0
+COST_STOP = 1.0
 
 
 class EvolutionState(State):
@@ -90,13 +99,59 @@ class LesionEvolutionDomain(
             int(p) for p in parc.lesion_parcel_set(subject.mask, coverage)
         )
         self.target: Optional[FrozenSet[int]] = target
+        self._b_norm, self._coverage = self._precompute_bio_priors()
+
+    # --- Biological priors (per-parcel) used by action_cost ---
+    def _precompute_bio_priors(self) -> Tuple[NDArray, NDArray]:
+        """Return (brightness[K+1], coverage[K]) arrays used for bio-cost.
+
+        `brightness[p]` is the mean DWI signal of parcel p, normalized to
+        [0, 1] by the 99th percentile over parcels (index 0 unused, matches
+        the 1..K parcel indexing used elsewhere).
+
+        `coverage[p-1]` is the fraction of parcel p's voxels that fall
+        inside the acute lesion mask. 0-indexed to match
+        `Parcellation.parcel_coverage`.
+        """
+        labels = self.parc.labels
+        dwi = self.subject.dwi.astype(np.float32)
+        flat_lab = labels.ravel()
+        flat_dwi = dwi.ravel()
+        K = self.parc.n_parcels
+        sizes = np.bincount(flat_lab, minlength=K + 1)
+        sums = np.bincount(flat_lab, weights=flat_dwi, minlength=K + 1)
+        brightness = np.where(sizes > 0, sums / np.maximum(sizes, 1), 0.0)
+        norm = float(max(np.percentile(brightness[1:], 99), 1e-6))
+        b_norm = np.clip(brightness / norm, 0.0, 1.0).astype(np.float32)
+        coverage = self.parc.parcel_coverage(self.subject.mask).astype(np.float32)
+        return b_norm, coverage
+
+    def action_cost(self, kind: int, parcel: int = 0) -> float:
+        """Biologically-weighted step cost in [COST_MIN, COST_MAX].
+
+        - SHRINK: cheap on dim, low-coverage parcels (edema resolution);
+          expensive on bright, high-coverage parcels (would un-infarct core).
+        - EXPAND: cheap on bright parcels (penumbral completion); expensive
+          on dim parcels (would seed new infarct in uninjured tissue).
+        - STOP: COST_STOP (unit).
+        """
+        if kind == STOP:
+            return COST_STOP
+        b = float(self._b_norm[parcel])
+        if kind == SHRINK:
+            cov = float(self._coverage[parcel - 1])
+            plaus = (1.0 - cov) * (1.0 - 0.5 * b)
+        else:  # EXPAND
+            plaus = b
+        plaus = max(0.0, min(1.0, plaus))
+        return COST_MIN + (COST_MAX - COST_MIN) * (1.0 - plaus)
 
     @classmethod
     def from_subject_id(
         cls, sid: str, n_parcels: int = 300, coverage: float = 0.3,
     ) -> "LesionEvolutionDomain":
         subj = load_subject(sid)
-        brain = subj.dwi > np.percentile(subj.dwi, 40)
+        brain = brain_mask(subj.dwi)
         parc = parcellate_dwi(subj.dwi, brain, n_parcels=n_parcels)
         return cls(subj, parc, coverage=coverage)
 
@@ -147,7 +202,7 @@ class LesionEvolutionDomain(
                 out_s.append(EvolutionState(s.active - {a.parcel}))
             else:
                 raise ValueError(f"bad action kind {a.kind}")
-            out_c.append(1.0)
+            out_c.append(self.action_cost(a.kind, a.parcel))
         return out_s, out_c
 
     def sample_state_action(

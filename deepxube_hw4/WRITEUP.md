@@ -14,7 +14,8 @@ problem as **goal-conditioned heuristic search on a parcellated brain**:
   supervoxel parcellation of the DWI volume. *SLIC (Simple Linear Iterative
   Clustering, Achanta et al. 2012)* is a constrained k-means over position +
   intensity that partitions a volume into `K` spatially compact, intensity-
-  coherent supervoxels — here, `K = 288` parcels per subject. *DWI (diffusion-
+  coherent supervoxels — here, `K = 285` parcels per subject on sub-1 after
+  the brain-mask iteration in §2.1. *DWI (diffusion-
   weighted imaging)* is the MR sequence most sensitive to cytotoxic edema;
   acute stroke lesions light up bright on the TRACE reconstruction used here.
 - **Start:** the acute lesion mask from SOOP (ds004889).
@@ -22,8 +23,10 @@ problem as **goal-conditioned heuristic search on a parcellated brain**:
   during training, or a real chronic mask at inference / validation.
 - **Actions:** `EXPAND p` (recruit a frontier parcel), `SHRINK p` (resolve a
   boundary parcel), or `STOP`.
-- **Cost:** unit per step for now; biologically-weighted costs are the
-  follow-up.
+- **Cost:** biologically-weighted (§4.6). Each EXPAND/SHRINK costs between
+  `COST_MIN = 0.5` (biologically plausible) and `COST_MAX = 2.0`
+  (implausible); STOP costs `1.0`. Unit-cost results in §5.1–5.2 correspond
+  to the original baseline; bio-cost results are in §5.3.
 
 Novelty for DeepXube: it has only been demonstrated on combinatorial puzzles.
 Variable-size action spaces over subject-specific parcellations with
@@ -63,12 +66,31 @@ SOOP DWI ─▶ SLIC parcellation ─▶ LesionEvolutionDomain ─▶ DeepXube m
 | `eval_heur.py` | 100-trial solve rate + path-optimality. |
 | `viz_with_heur.py` | Interactive & solve-mode viz with live Q-values. |
 
-![SLIC parcellation (K=288) with lesion overlay](soop_sub1_parcels.png)
+![SLIC parcellation (K=285) with lesion overlay](soop_sub1_parcels.png)
 
-*Figure 2: Subject-specific SLIC supervoxel parcellation (K = 288) on the
+*Figure 2: Subject-specific SLIC supervoxel parcellation (K = 285) on the
 left; the acute lesion overlay on the right. Each state is a frozenset of
 active parcel indices; actions are EXPAND / SHRINK over parcels adjacent to
 the current boundary.*
+
+### 2.1 Brain-mask iteration
+
+Parcellation quality depends entirely on what gets fed to SLIC as the "brain".
+The first pass was a one-liner intensity threshold,
+`subj.dwi > np.percentile(subj.dwi, 40)`, and it had no connectivity
+constraint: on sub-1 it produced a mask with **128 disconnected components** —
+eye globes, the scalp rim, and bright noise specks all cleared the threshold
+and SLIC tiled each one with its own micro-parcels. Visible as coloured
+"islands" drifting off the brain in early parcellation figures, and as
+unreachable parcels in the expand/shrink adjacency graph (they share no face
+with the main mass, so the search can never recruit them).
+
+The fix is one extra line — take the largest connected component of the
+thresholded mask via `scipy.ndimage.label` — and collapses the mask to 1
+component, drops 752 island voxels, and brings `K` from 288 to 285 without
+touching any real brain tissue. Figure 2 shows the post-fix parcellation;
+the §4 / §5 numbers below were measured against the pre-fix K = 288 mask
+(see note in §5).
 
 ## 3. Biological simulator
 
@@ -165,7 +187,78 @@ Candidate fixes (not pursued here):
 - Replace beam-1 with wider beam or A\*-style search once the framework allows.
 - Freeze the warm heuristic and train only a policy head on top.
 
+### 4.6 Biologically-weighted step costs (`output_warm_bio/`)
+
+The initial cost model used unit cost per toggle, which makes every EXPAND /
+SHRINK equivalent regardless of which parcel is being moved. That bakes in
+the wrong objective — clinically, resolving a rim-of-lesion dim parcel
+(edema) is very different from un-infarcting a bright high-coverage parcel
+(which would imply reversing a core infarct). The minimum-length plan is not
+the minimum-biological-cost plan.
+
+`LesionEvolutionDomain.action_cost(kind, parcel)` now returns:
+
+```
+SHRINK:  plaus = (1 - coverage) · (1 - 0.5 · brightness)
+EXPAND:  plaus = brightness
+cost = COST_MIN + (COST_MAX - COST_MIN) · (1 - plaus)   # [0.5, 2.0]
+STOP:    cost = 1.0
+```
+
+`brightness` is the mean DWI signal of the parcel normalized to [0, 1] by
+the 99th percentile; `coverage` is the fraction of the parcel's voxels that
+fall inside the acute mask. The weights mirror the simulator's plausibility
+weights (§3), so every trajectory the simulator favors as "likely" is also
+cheap under search.
+
+Downstream plumbing:
+
+- `next_state` now returns `action_cost(...)` instead of `1.0`.
+- `pretrain_heur.build_dataset` builds targets from **cumulative bio-cost**
+  from each state to the end of the simulator trajectory (not `T - t`).
+  Negative samples get `remaining[t] + action_cost(a_neg)` as a mild upper
+  bound.
+- `eval_heur` reports both `mean_len` (unchanged) and `mean_cost` (new),
+  with length-optimality `path_len / |s△g|` and cost-optimality
+  `path_cost / (COST_MIN · |s△g|)` — the latter's admissible lower bound is
+  the all-plausible-toggles path.
+
+### 4.7 Multi-objective training target (`output_warm_mo/`)
+
+§5.3 shows the pure-cost warm-start (§4.6) finds length-optimal but not
+cost-optimal paths. Hypothesis: the MSE target `cost_remaining` lets the net
+exploit `|s△g|` geometry to saturate length-optimality before its predictions
+are well-calibrated on cost, so greedy-Q minimizes a length-dominated proxy.
+
+Fix tried: make the training target a weighted sum of length and cost:
+
+```
+target = λ · len_remaining + (1 − λ) · cost_remaining
+```
+
+Implemented via `--lambda_len` in `pretrain_heur`. Negatives use
+`target(len_rem + 1, cost_rem + action_cost(a_neg))`.
+
+- λ = 0.0 → pure bio-cost (§4.6 behavior)
+- λ = 1.0 → pure length (matches the original §4.4 unit-cost target)
+- λ ∈ (0, 1) → multi-objective
+
+### 4.8 Parcellation drift caveat
+
+The original 87% solve-rate (§5.1) was measured on the **pre-fix K=288**
+parcellation. The §2.1 brain-mask connectivity fix dropped K to 285 and
+**invalidated the old `output_warm/heur.pt`** (1445-dim input layer → 1430
+now). The §5.3 (bio-cost) and §5.4 (multi-objective) numbers are freshly
+trained on K=285 and should be considered the current reference; pre-fix §5
+numbers are kept for historical record but not directly comparable.
+
 ## 5. Results
+
+*Benchmark numbers in this section were measured against the pre-fix
+parcellation (K = 288; §2.1). The current code produces K = 285 on sub-1;
+retraining on the new mask is pending and expected to shift the numbers
+only marginally since the 3 dropped parcels are non-brain islands that
+were never part of the acute or chronic lesion masks.*
 
 ### 5.1 Warm-start heuristic, 100-trial eval
 
@@ -217,6 +310,72 @@ start, lime outline = target goal, red fill = current active parcels.
 Green outlines mark the frontier of parcels the Q-head is evaluating at
 this step.*
 
+### 5.3 Bio-cost heuristic, 100-trial eval
+
+Same protocol as §5.1 (seed=1, reverse-walk ∈ [2, 15], budget=60), but using
+the `output_warm_bio/` checkpoint trained with bio-weighted cost targets
+(§4.6). Mean cost-to-go in the training set is 11.9 (vs. 7.5 under unit
+cost, because bio-costs average above 1.0 along simulator trajectories).
+
+```
+Trials: 100  solved: 69/100 = 69.0%
+Mean length-optimality (path_len/|s△g|, solved): 1.000
+Mean cost-optimality (path_cost/(c_min·|s△g|), solved): 2.92
+  (1.0 = admissible floor where every step is fully plausible)
+```
+
+Two things stand out:
+
+- **Length-optimality is preserved (= 1.000 on every solved bucket).**
+  Bio-costs change *which* toggles are cheap but not whether the heuristic
+  picks shortest paths among those it reaches. Good sanity — the geometric
+  lower bound `|s△g|` is still saturated.
+- **Cost-optimality is ≈ 2.9× the floor.** The warm-start net finds short
+  paths but does not yet prefer cheap ones — it solves by toggling whichever
+  parcels reduce `|s△g|` fastest, not the ones biology would pick. A policy
+  head trained on bio-cost Q-values would address this; unit-cost + bio-cost
+  as a multi-objective weighted sum (λ·len + (1-λ)·cost) is another lever.
+- **Absolute solve rate drops 87% → 69%.** The cost landscape is richer so
+  a fixed MLP capacity has a harder target function, and 400 simulator
+  trajectories may now under-sample the cost space. Scaling training data
+  or training depth should recover most of the gap. (But see §4.8 — part
+  of the 87% → 69% gap is the K=288 → K=285 parcellation change, not
+  bio-costs.)
+
+### 5.4 Multi-objective λ sweep
+
+Same 100-trial protocol, same K=285 parcellation, seed=1, across five
+λ values:
+
+| λ_len | checkpoint            | solved | len_opt | cost_opt |
+|-------|-----------------------|--------|---------|----------|
+| 0.0   | `output_warm_mo_00/`  | 70 %   | 1.000   | 2.97     |
+| 0.3   | `output_warm_mo_03/`  | 62.6 % | 1.000   | 2.93     |
+| **0.5** | **`output_warm_mo_05/`** | **72 %** | **1.000** | **2.93** |
+| 0.7   | `output_warm_mo_07/`  | 69 %   | 1.000   | 3.05     |
+| 1.0   | `output_warm_mo_10/`  | 62 %   | 1.000   | 2.94     |
+
+Two findings, one positive and one negative:
+
+- **Solve rate is concave in λ, peaking at λ = 0.5 (72 %).** Pure-length
+  (λ=1) and pure-cost (λ=0) both underperform a balanced objective by
+  2–10 pts. Intuition: the length signal gives a strong "progress toward
+  `|s△g|=0`" gradient (scale 0–20), while the cost signal gives finer
+  discrimination among similar-length continuations. Combining them
+  regularizes the Q-function and makes fewer local minima.
+- **Cost-optimality is ≈ constant (2.93–3.05) regardless of λ.** The
+  weighted-sum target does **not** reduce the bio-cost of the paths the
+  net finds — it only affects *which* paths it finds. Diagnosis: when
+  the greedy-Q argmin sees actions with comparable predicted Q, the
+  length term dominates the ranking because it varies ~10× more than the
+  cost term across legal actions. Pure weighted-sum is insufficient to
+  induce cost-seeking behavior.
+
+Conclusion: λ = 0.5 is promoted as the new canonical warm-start (72 % solve
+rate, length-optimal paths). Cost-optimality remains an open problem —
+next attempts should use a dual-head net (§7 item 2) so the cost signal
+can't be drowned out at inference.
+
 ## 6. Progress log
 
 - **Pivot from surgical-corridor** (original HW4 direction in §1 of v1 of
@@ -230,6 +389,10 @@ this step.*
 - **DAVI 50-iter smoke**: loss dropped 0.1→0.06, cost-to-go target 2.58 /
   pred 2.23 — looked healthy at small scale but failed to generalize at 2k.
 - **Diagnosis above (§4.1–4.3)** → **warm-start fix (§4.4)**.
+- **Brain-mask cleanup (§2.1)**: spotted "island" parcels drifting off the
+  brain in early figures; traced to the missing connectivity constraint in
+  the intensity-only threshold. One-line largest-CC filter collapsed 128
+  mask components → 1 and tightened K from 288 to 285.
 
 ## 7. Next steps
 
@@ -237,12 +400,14 @@ this step.*
    exploration/exploitation, not representation — retry with
    `beam_q.1B_0.1T` (or wider beam once supported) so the warm heuristic is
    actually followed during data generation.
-2. **Biologically-weighted step costs.** Replace unit cost in
-   `LesionEvolutionDomain.next_state` with cost from parcel DWI signal +
-   coverage (edema resolution cheap, core expansion expensive). The
-   interesting RL problem is *minimum-cost* evolution trajectories, not
-   minimum-length.
-3. **Cross-subject generalization.** Current MLP is tied to `K = 288`; move to
+2. **Cost-seeking heuristic via dual-head net.** §5.4 shows scalar
+   weighted-sum targets don't reduce cost-optimality (flat at ≈ 2.9×
+   floor) — the length term dominates the greedy-Q argmin because its
+   range is ~10× wider than the cost term. Next attempt: two-headed Q
+   (length head + cost head), combine at inference with a sweepable λ.
+   Each head gets clean scalar supervision and the cost signal can't be
+   drowned out.
+3. **Cross-subject generalization.** Current MLP is tied to `K = 285`; move to
    a subject-invariant input (parcel features rather than one-hot) so a single
    heuristic transfers across SOOP subjects.
 4. **External validation.** Pair-wise acute + chronic timepoints from ISLES

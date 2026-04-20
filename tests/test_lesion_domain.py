@@ -69,3 +69,33 @@ def test_simulator_rollout(domain):
     traj = simulate(domain, np.random.default_rng(0), max_steps=10)
     assert traj.length >= 0
     assert len(traj.states) == traj.length + 1
+
+
+def test_action_cost_range_and_determinism(domain):
+    from deepxube_hw4.evolution import (
+        COST_MAX, COST_MIN, COST_STOP, EXPAND, SHRINK, STOP,
+    )
+
+    assert domain.action_cost(STOP) == COST_STOP
+    seen = set()
+    for kind in (EXPAND, SHRINK):
+        for p in range(1, min(domain.K, 30) + 1):
+            c1 = domain.action_cost(kind, p)
+            c2 = domain.action_cost(kind, p)
+            assert c1 == c2, "action_cost must be deterministic"
+            assert COST_MIN <= c1 <= COST_MAX, f"{kind} p={p} cost={c1} out of range"
+            seen.add(round(c1, 4))
+    # Bio-costs should vary across parcels (not collapse to a single value).
+    assert len(seen) > 1, "action_cost should differ by parcel"
+
+
+def test_next_state_returns_bio_costs(domain):
+    from deepxube_hw4.evolution import COST_MAX, COST_MIN
+    s = domain.start_state()
+    acts = [a for a in domain.legal_actions(s) if a.kind != 0][:5]
+    if not acts:
+        return
+    _, costs = domain.next_state([s] * len(acts), acts)
+    assert all(COST_MIN <= c <= COST_MAX for c in costs)
+    for a, c in zip(acts, costs):
+        assert c == domain.action_cost(a.kind, a.parcel)
