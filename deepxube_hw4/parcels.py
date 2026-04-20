@@ -6,6 +6,7 @@ from typing import Tuple
 
 import numpy as np
 from numpy.typing import NDArray
+from scipy.ndimage import label
 from skimage.segmentation import slic
 
 
@@ -29,6 +30,17 @@ class Parcellation:
         hits = np.bincount(flat_lab, weights=flat_msk.astype(np.float32),
                            minlength=self.n_parcels + 1)[1:]
         return np.where(sizes > 0, hits / np.maximum(sizes, 1), 0.0)
+
+
+def brain_mask(dwi: NDArray, percentile: float = 40.0) -> NDArray:
+    """Intensity threshold + largest connected component, to drop non-brain islands."""
+    raw = dwi > np.percentile(dwi, percentile)
+    lab, n = label(raw)
+    if n == 0:
+        return raw
+    sizes = np.bincount(lab.ravel())
+    sizes[0] = 0
+    return lab == int(sizes.argmax())
 
 
 def parcellate_dwi(

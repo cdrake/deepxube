@@ -24,7 +24,7 @@ from deepxube_hw4.evolution import (
     EXPAND, SHRINK, STOP,
     EvolutionAction, EvolutionGoal, EvolutionState, LesionEvolutionDomain,
 )
-from deepxube_hw4.parcels import parcellate_dwi
+from deepxube_hw4.parcels import brain_mask, parcellate_dwi
 from deepxube_hw4.soop import load_subject
 
 
@@ -36,7 +36,7 @@ class TrainableLesionEvo(
 ):
     def __init__(self, subject_id: str = "sub-1", n_parcels: int = 300, coverage: float = 0.3):
         subj = load_subject(subject_id)
-        brain = subj.dwi > np.percentile(subj.dwi, 40)
+        brain = brain_mask(subj.dwi)
         parc = parcellate_dwi(subj.dwi, brain, n_parcels=n_parcels)
         LesionEvolutionDomain.__init__(self, subj, parc, coverage=coverage)
         self.subject_id: str = subject_id
