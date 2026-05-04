@@ -11,14 +11,10 @@ import matplotlib.pyplot as plt
 import nibabel as nib
 import numpy as np
 
-DEFAULT_FILE = (
-    "/Users/chrisdrake/Dev/niivue/niivue/packages/niivue/demos/images/mni152.nii.gz"
-)
-
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--file", type=Path, default=Path(DEFAULT_FILE),
+    p.add_argument("--file", type=Path, required=True,
                    help="Path to a .nii or .nii.gz volume.")
     p.add_argument("--downsample", type=int, default=4,
                    help="Integer stride applied to each axis before rendering.")
